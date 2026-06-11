@@ -462,9 +462,15 @@ function saveState() {
 // ============================================================
 function getEffectiveClients() {
   const hidden = new Set(hiddenClients);
-  // Manual merge secondaries
-  const manualSecondaries = new Set(manualMerges.map(m => m.secondary_rut));
-  return DATA.clients.filter(c => !hidden.has(c.rut) && !manualSecondaries.has(c.rut));
+  // Known merge secondaries (embedded in DATA) – these must be hidden too
+  const knownSecondaries = new Set((DATA.known_merges || []).flatMap(m => m.secondary_ruts || []));
+  // Manual merge secondaries – handle both secondary_rut (singular) and secondary_ruts (plural)
+  const manualSecondaries = new Set(manualMerges.flatMap(m =>
+    m.secondary_ruts ? m.secondary_ruts : (m.secondary_rut ? [m.secondary_rut] : [])
+  ));
+  return DATA.clients.filter(c =>
+    !hidden.has(c.rut) && !knownSecondaries.has(c.rut) && !manualSecondaries.has(c.rut)
+  );
 }
 
 // Get all secondary ruts for a primary (auto + manual)
@@ -482,10 +488,18 @@ function getAllSecondaries(primaryRut) {
 }
 
 function getDisplayName(rut) {
-  const merge = mergedClients.find(m => m.primary_rut === rut);
   const c = DATA.clients.find(c => c.rut === rut);
-  if (merge) return (c ? c.nombre : rut) + ' / ' + getClientName(merge.secondary_rut);
-  return c ? c.nombre : rut;
+  const name = c ? c.nombre : rut;
+  // Manual merges: handle secondary_ruts (plural) or secondary_rut (singular)
+  const merge = manualMerges.find(m => m.primary_rut === rut);
+  if (merge) {
+    const secs = merge.secondary_ruts ? merge.secondary_ruts : (merge.secondary_rut ? [merge.secondary_rut] : []);
+    if (secs.length > 0) return name + ' / ' + secs.map(r => getClientName(r)).join(' / ');
+  }
+  // Known merges: use display_name if available
+  const km = (DATA.known_merges || []).find(m => m.primary_rut === rut);
+  if (km) return km.display_name || name;
+  return name;
 }
 
 function getClientName(rut) {
@@ -840,7 +854,11 @@ function loadCategory(cat) {
 
   const buyers = DATA.cat_clients[cat] || {};
   const hidden = new Set(hiddenClients);
-  const secondaryRuts = new Set(mergedClients.map(m => m.secondary_rut));
+  const _knownSecRuts = new Set((DATA.known_merges || []).flatMap(m => m.secondary_ruts || []));
+  const _manualSecRuts = new Set(mergedClients.flatMap(m =>
+    m.secondary_ruts ? m.secondary_ruts : (m.secondary_rut ? [m.secondary_rut] : [])
+  ));
+  const secondaryRuts = new Set([..._knownSecRuts, ..._manualSecRuts]);
 
   // Build buyers list (merging secondaries into primaries)
   const mergedBuyerMap = {}; // primary_rut -> combined data
@@ -957,7 +975,11 @@ function renderCatNever() {
 function renderMonthly() {
   const search = (document.getElementById('monthly-search').value || '').toLowerCase();
   const hidden = new Set(hiddenClients);
-  const secondaryRuts = new Set(mergedClients.map(m => m.secondary_rut));
+  const _knownSecRuts = new Set((DATA.known_merges || []).flatMap(m => m.secondary_ruts || []));
+  const _manualSecRuts = new Set(mergedClients.flatMap(m =>
+    m.secondary_ruts ? m.secondary_ruts : (m.secondary_rut ? [m.secondary_rut] : [])
+  ));
+  const secondaryRuts = new Set([..._knownSecRuts, ..._manualSecRuts]);
 
   let clients = DATA.clients.filter(c => !hidden.has(c.rut) && !secondaryRuts.has(c.rut));
   if (search) clients = clients.filter(c => c.nombre.toLowerCase().includes(search) || c.rut.includes(search));
@@ -1088,12 +1110,12 @@ function renderSuspects() {
     const secNames = secRuts.map(r => getClientName(r)).join(' / ');
     const displayName = getClientName(m.primary_rut) + ' / ' + secNames;
     const secRutsStr = secRuts.join(', ');
-    const secRutsEscaped = JSON.stringify(secRuts).replace(/'/g, "\'");
+    const secsJoined = secRuts.join('|');
     mhtml += `<tr>
       <td>${displayName}</td>
       <td style="font-size:.82rem;color:#64748b">${m.primary_rut}</td>
       <td style="font-size:.82rem;color:#64748b">${secRutsStr}</td>
-      <td><button class="btn btn-danger" onclick="undoMergeMulti('${m.primary_rut}',${secRutsEscaped})">&#8635; Deshacer</button></td>
+      <td><button class="btn btn-danger" data-prim="${m.primary_rut}" data-secs="${secsJoined}" onclick="handleUndoMerge(this)">&#8635; Deshacer</button></td>
     </tr>`;
   }
   mtbody.innerHTML = mhtml;
@@ -1178,6 +1200,12 @@ function undoMerge(primary_rut, secondary_rut) {
   if (currentClientRut) loadClient(currentClientRut);
 }
 
+function handleUndoMerge(btn) {
+  const primaryRut = btn.getAttribute('data-prim');
+  const secs = btn.getAttribute('data-secs').split('|').filter(Boolean);
+  undoMergeMulti(primaryRut, secs);
+}
+
 function undoMergeMulti(primary_rut, secondary_ruts) {
   manualMerges = manualMerges.filter(m => {
     const secs = m.secondary_ruts || (m.secondary_rut ? [m.secondary_rut] : []);
@@ -1222,7 +1250,11 @@ function closeGestionModal() {
 
 function renderGestionList() {
   const search = (document.getElementById('gestion-search').value || '').toLowerCase();
-  const secondaryRuts = new Set(mergedClients.map(m => m.secondary_rut));
+  const _knownSecRuts = new Set((DATA.known_merges || []).flatMap(m => m.secondary_ruts || []));
+  const _manualSecRuts = new Set(mergedClients.flatMap(m =>
+    m.secondary_ruts ? m.secondary_ruts : (m.secondary_rut ? [m.secondary_rut] : [])
+  ));
+  const secondaryRuts = new Set([..._knownSecRuts, ..._manualSecRuts]);
   let clients = DATA.clients.filter(c =>
     !secondaryRuts.has(c.rut) &&
     (!search || c.nombre.toLowerCase().includes(search) || c.rut.includes(search))
